@@ -37,6 +37,31 @@ fn main() {
             } else if weight_name.contains("k_proj") || weight_name.contains("v_proj") {
                 data = transpose(&data, 1024, 4096);
             } else if weight_name.contains("gate_proj") || weight_name.contains("up_proj") {
+                // Merge with other up/gate proj
+                if weight_name.contains("gate_proj") {
+                    if let Some(Fp16Vec(up, _)) =
+                        weights.remove(&weight_name.replace("gate_proj", "up_proj"))
+                    {
+                        data.append(&mut transpose(&up, 4096, 14336));
+                        weights.insert(
+                            weight_name.replace("gate_proj", "gate_up_proj"),
+                            Fp16Vec(transpose(&data, 14336 * 2, 4096), vec![data.len()]),
+                        );
+                        continue;
+                    }
+                } else {
+                    if let Some(Fp16Vec(gate, _)) =
+                        weights.remove(&weight_name.replace("up_proj", "gate_proj"))
+                    {
+                        let mut gate = transpose(&gate, 4096, 14336);
+                        gate.append(&mut data);
+                        weights.insert(
+                            weight_name.replace("up_proj", "gate_up_proj"),
+                            Fp16Vec(transpose(&gate, 14336 * 2, 4096), vec![gate.len()]),
+                        );
+                        continue;
+                    }
+                }
                 data = transpose(&data, 14336, 4096);
             } else if weight_name.contains("down_proj") {
                 data = transpose(&data, 4096, 14336);

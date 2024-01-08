@@ -14,6 +14,7 @@ pub const NUM_LAYERS: usize = 32;
 pub const N_HEADS: usize = 32;
 pub const N_KV_HEADS: usize = 8;
 pub const MLP_DIM: usize = 14336;
+pub const MLP_DIM_DOUBLE: usize = MLP_DIM * 2;
 
 pub const N_ATTENTION_GROUPS: usize = N_HEADS / N_KV_HEADS;
 pub const HEAD_DIM: usize = HIDDEN_DIM / N_HEADS;
@@ -25,40 +26,61 @@ pub type KVCache<Batch, Seq> = (
     GraphTensor<(Batch, Const<N_KV_HEADS>, Seq, Const<HEAD_DIM>)>,
 );
 
-pub struct Mlp<const I: usize, const H: usize> {
-    pub gate_proj: GraphTensor<(Const<H>, Const<I>)>,
+pub struct Mlp<const I: usize, const H: usize, const HI: usize> {
+    pub gate_up_proj: GraphTensor<(Const<H>, Const<HI>)>,
     pub down_proj: GraphTensor<(Const<I>, Const<H>)>,
-    pub up_proj: GraphTensor<(Const<H>, Const<I>)>,
 }
 
-impl<Sh: Shape, Im: Shape, const I: usize, const H: usize> Module<GraphTensor<Sh>> for Mlp<I, H>
-where
-    GraphTensor<Sh>: Matmul<R2<H, I>, Output = GraphTensor<Im>>,
-    GraphTensor<Im>: Matmul<R2<I, H>, Output = GraphTensor<Sh>>,
+impl<Batch: Dimension, const I: usize, const H: usize, const HI: usize>
+    Module<GraphTensor<(Batch, Const<H>)>> for Mlp<I, H, HI>
 {
-    type Output = GraphTensor<Sh>;
+    type Output = GraphTensor<(Batch, Const<H>)>;
 
-    fn forward(&self, input: GraphTensor<Sh>) -> Self::Output {
-        let gate = input.matmul(self.gate_proj).swish();
-        let up = input.matmul(self.up_proj) * gate;
+    fn forward(&self, input: GraphTensor<(Batch, Const<H>)>) -> Self::Output {
+        let matmulled = input.matmul(self.gate_up_proj);
+        let gate = matmulled
+            .slice((.., ..Expression::from(I)))
+            .realize::<(Batch, Const<I>)>()
+            .swish();
+        let up = matmulled
+            .slice((.., Expression::from(I)..))
+            .realize::<(Batch, Const<I>)>()
+            * gate;
         up.matmul(self.down_proj)
     }
 }
 
-impl<const I: usize, const H: usize> InitModule for Mlp<I, H> {
+impl<Batch: Dimension, Seq: Dimension, const I: usize, const H: usize, const HI: usize>
+    Module<GraphTensor<(Batch, Seq, Const<H>)>> for Mlp<I, H, HI>
+{
+    type Output = GraphTensor<(Batch, Seq, Const<H>)>;
+
+    fn forward(&self, input: GraphTensor<(Batch, Seq, Const<H>)>) -> Self::Output {
+        let matmulled = input.matmul(self.gate_up_proj);
+        let gate = matmulled
+            .slice((.., .., ..Expression::from(I)))
+            .realize::<(Batch, Seq, Const<I>)>()
+            .swish();
+        let up = matmulled
+            .slice((.., .., Expression::from(I)..))
+            .realize::<(Batch, Seq, Const<I>)>()
+            * gate;
+        up.matmul(self.down_proj)
+    }
+}
+
+impl<const I: usize, const H: usize, const HI: usize> InitModule for Mlp<I, H, HI> {
     fn initialize(cx: &mut Graph) -> Self {
         Self {
-            gate_proj: cx.named_tensor("Gate Weight"),
-            up_proj: cx.named_tensor("Up Weight"),
+            gate_up_proj: cx.named_tensor("Gate-Up Weight"),
             down_proj: cx.named_tensor("Down Weight"),
         }
     }
 }
 
-impl<const I: usize, const H: usize> SerializeModule for Mlp<I, H> {
+impl<const I: usize, const H: usize, const HI: usize> SerializeModule for Mlp<I, H, HI> {
     fn serialize(&self, s: &mut Serializer) {
-        s.tensor("gate_proj/weight", self.gate_proj);
-        s.tensor("up_proj/weight", self.up_proj);
+        s.tensor("gate_up_proj/weight", self.gate_up_proj);
         s.tensor("down_proj/weight", self.down_proj);
     }
 }
@@ -264,7 +286,7 @@ impl SerializeModule for SelfAttention {
 pub struct TransformerBlock {
     pub attention: SelfAttention,
     pub attention_norm: RMSNorm<HIDDEN_DIM>,
-    pub feed_forward: Mlp<MLP_DIM, HIDDEN_DIM>,
+    pub feed_forward: Mlp<MLP_DIM, HIDDEN_DIM, MLP_DIM_DOUBLE>,
     pub feed_forward_norm: RMSNorm<HIDDEN_DIM>,
 }
 
